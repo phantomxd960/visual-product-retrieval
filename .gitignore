@@ -1,0 +1,14 @@
+# Large folders and generated files
+data/
+models/*.pth
+outputs/*.npy
+outputs/*.json
+outputs/*.index
+
+# Virtual environments
+vr_env/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
