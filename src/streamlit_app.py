@@ -9,7 +9,12 @@ from PIL import Image
 
 import streamlit as st
 
-from transformers import CLIPProcessor, CLIPModel
+from transformers import (
+    CLIPProcessor,
+    CLIPModel,
+    Blip2Processor,
+    Blip2ForConditionalGeneration
+)
 from ultralytics import YOLO
 
 # =====================================================
@@ -24,19 +29,56 @@ st.set_page_config(
 st.title("🛍️ Visual Product Search Engine")
 st.write(
     "Upload a fashion image, choose Upper Body / Lower Body / Full Body, "
-    "confirm the crop, and retrieve similar products."
+    "confirm the crop, and retrieve similar products using "
+    "Fine-Tuned CLIP + BLIP-2 Semantic Re-ranking."
 )
+
+# =====================================================
+# BEST CONFIGURATION
+# =====================================================
+BEST_SEED = 2023032
+BEST_ALPHA_TAG = "07"
 
 # =====================================================
 # PATHS
 # =====================================================
 BASE_PATH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-INDEX_FILE = os.path.join(BASE_PATH, "outputs", "faiss_hnsw_ft.index")
-PATH_FILE = os.path.join(BASE_PATH, "outputs", "image_paths_ft.json")
-EMBED_FILE = os.path.join(BASE_PATH, "outputs", "embeddings_ft.npy")
-MODEL_PATH = os.path.join(BASE_PATH, "models", "clip_finetuned.pth")
-IMAGE_DIR = os.path.join(BASE_PATH, "outputs", "cropped_images")
+MODEL_PATH = os.path.join(
+    BASE_PATH,
+    "models",
+    f"clip_finetuned_seed{BEST_SEED}.pth"
+)
+
+INDEX_FILE = os.path.join(
+    BASE_PATH,
+    "outputs",
+    f"faiss_seed{BEST_SEED}_alpha{BEST_ALPHA_TAG}.index"
+)
+
+PATH_FILE = os.path.join(
+    BASE_PATH,
+    "outputs",
+    f"image_paths_seed{BEST_SEED}_alpha{BEST_ALPHA_TAG}.json"
+)
+
+EMBED_FILE = os.path.join(
+    BASE_PATH,
+    "outputs",
+    f"embeddings_seed{BEST_SEED}_alpha{BEST_ALPHA_TAG}.npy"
+)
+
+CAPTION_FILE = os.path.join(
+    BASE_PATH,
+    "outputs",
+    "captions.json"
+)
+
+IMAGE_DIR = os.path.join(
+    BASE_PATH,
+    "outputs",
+    "cropped_images"
+)
 
 SEARCH_K = 15
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -46,11 +88,12 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 # =====================================================
 @st.cache_resource
 def load_models():
+    # -------- CLIP --------
     clip_name = "openai/clip-vit-base-patch32"
 
-    processor = CLIPProcessor.from_pretrained(clip_name)
+    clip_processor = CLIPProcessor.from_pretrained(clip_name)
 
-    model = CLIPModel.from_pretrained(
+    clip_model = CLIPModel.from_pretrained(
         clip_name,
         use_safetensors=True
     ).to(device)
@@ -61,12 +104,31 @@ def load_models():
         weights_only=True
     )
 
-    model.load_state_dict(state_dict)
-    model.eval()
+    clip_model.load_state_dict(state_dict)
+    clip_model.eval()
 
+    # -------- BLIP-2 --------
+    blip_processor = Blip2Processor.from_pretrained(
+        "Salesforce/blip2-flan-t5-xl"
+    )
+
+    blip_model = Blip2ForConditionalGeneration.from_pretrained(
+        "Salesforce/blip2-flan-t5-xl",
+        torch_dtype=torch.float16 if device == "cuda" else torch.float32
+    ).to(device)
+
+    blip_model.eval()
+
+    # -------- YOLO --------
     yolo_model = YOLO("yolov8n.pt")
 
-    return processor, model, yolo_model
+    return (
+        clip_processor,
+        clip_model,
+        blip_processor,
+        blip_model,
+        yolo_model
+    )
 
 
 @st.cache_resource
@@ -78,26 +140,39 @@ def load_index():
 
     embeddings = np.load(EMBED_FILE).astype("float32")
 
-    return index, image_paths, embeddings
+    with open(CAPTION_FILE, "r") as f:
+        captions = json.load(f)
+
+    return index, image_paths, embeddings, captions
 
 
 # =====================================================
 # LOAD EVERYTHING
 # =====================================================
-with st.spinner("Loading models and index..."):
-    clip_processor, clip_model, yolo_model = load_models()
-    index, image_paths, embeddings = load_index()
+with st.spinner("Loading models and index... (BLIP-2 may take a minute)"):
+    (
+        clip_processor,
+        clip_model,
+        blip_processor,
+        blip_model,
+        yolo_model
+    ) = load_models()
 
-st.success(f"System loaded successfully. Indexed {len(image_paths):,} products.")
+    (
+        index,
+        image_paths,
+        embeddings,
+        captions
+    ) = load_index()
+
+st.success(
+    f"System loaded successfully. Indexed {len(image_paths):,} products."
+)
 
 # =====================================================
 # FUNCTIONS
 # =====================================================
 def detect_largest_box(image):
-    """
-    Run YOLO and return the largest detected bounding box.
-    Returns (x1, y1, x2, y2) or None.
-    """
     results = yolo_model(image, verbose=False)
     boxes = results[0].boxes
 
@@ -119,18 +194,11 @@ def detect_largest_box(image):
 
 
 def crop_by_preference(image, box, preference):
-    """
-    preference:
-        - Upper Body
-        - Lower Body
-        - Full Body
-    """
     if box is None:
         return image
 
     x1, y1, x2, y2 = box
 
-    # Clamp to image bounds
     x1 = max(0, x1)
     y1 = max(0, y1)
     x2 = min(image.width, x2)
@@ -139,10 +207,7 @@ def crop_by_preference(image, box, preference):
     if x2 <= x1 or y2 <= y1:
         return image
 
-    if preference == "Full Body":
-        crop_box = (x1, y1, x2, y2)
-
-    elif preference == "Upper Body":
+    if preference == "Upper Body":
         mid_y = y1 + (y2 - y1) // 2
         crop_box = (x1, y1, x2, mid_y)
 
@@ -150,12 +215,11 @@ def crop_by_preference(image, box, preference):
         mid_y = y1 + (y2 - y1) // 2
         crop_box = (x1, mid_y, x2, y2)
 
-    else:
+    else:  # Full Body
         crop_box = (x1, y1, x2, y2)
 
     cropped = image.crop(crop_box)
 
-    # Avoid invalid crops
     if cropped.width < 5 or cropped.height < 5:
         return image
 
@@ -181,27 +245,80 @@ def encode_query(image):
     return feats.cpu().numpy().astype("float32")
 
 
-def search(query_vec, top_k):
-    D, I = index.search(query_vec, SEARCH_K)
+def blip_score(query_image, caption):
+    if not caption:
+        caption = "a clothing item"
 
-    results = []
-    seen = set()
+    try:
+        inputs = blip_processor(
+            images=query_image,
+            text=f"Does this image match: {caption}?",
+            return_tensors="pt"
+        ).to(device)
+
+        with torch.no_grad():
+            outputs = blip_model.generate(
+                **inputs,
+                max_new_tokens=3
+            )
+
+        answer = blip_processor.tokenizer.decode(
+            outputs[0],
+            skip_special_tokens=True
+        ).lower().strip()
+
+        if "yes" in answer:
+            return 1.0
+        elif "no" in answer:
+            return 0.0
+        else:
+            return 0.5
+
+    except Exception:
+        return 0.5
+
+
+def search(query_image, top_k):
+    query_vec = encode_query(query_image)
+
+    # Stage 1: FAISS retrieval
+    _, I = index.search(query_vec, SEARCH_K)
+
+    candidates = []
 
     for idx in I[0]:
         path = image_paths[idx]
+        caption = captions.get(path, "a clothing item")
 
-        # Avoid duplicates
-        if path in seen:
-            continue
-        seen.add(path)
+        clip_score = float(
+            np.dot(query_vec[0], embeddings[idx])
+        )
 
-        score = float(np.dot(query_vec[0], embeddings[idx]))
-        results.append((path, score))
+        # Stage 2: BLIP-2 semantic reranking
+        semantic_score = blip_score(
+            query_image,
+            caption
+        )
 
-        if len(results) >= top_k:
-            break
+        final_score = 0.8 * clip_score + 0.2 * semantic_score
 
-    return results
+        candidates.append(
+            (
+                path,
+                final_score,
+                clip_score,
+                semantic_score
+            )
+        )
+
+    # Sort by combined score
+    candidates = sorted(
+        candidates,
+        key=lambda x: x[1],
+        reverse=True
+    )
+
+    return candidates[:top_k]
 
 
 # =====================================================
@@ -242,11 +359,14 @@ if uploaded is not None:
     if st.button("Detect Clothing Region"):
         with st.spinner("Running YOLO detection..."):
             box = detect_largest_box(image)
-            cropped = crop_by_preference(image, box, crop_preference)
+            cropped = crop_by_preference(
+                image,
+                box,
+                crop_preference
+            )
 
         st.session_state["cropped_image"] = cropped
 
-        # Remove previous results if any
         if "results" in st.session_state:
             del st.session_state["results"]
 
@@ -255,7 +375,10 @@ if uploaded is not None:
     # ---------------------------------------------
     if "cropped_image" in st.session_state:
         st.subheader("Detected Crop Preview")
-        st.image(st.session_state["cropped_image"], width=350)
+        st.image(
+            st.session_state["cropped_image"],
+            width=350
+        )
 
         col1, col2 = st.columns(2)
 
@@ -264,11 +387,13 @@ if uploaded is not None:
             if st.button("Confirm Crop and Search"):
                 cropped = st.session_state["cropped_image"]
 
-                with st.spinner("Encoding query..."):
-                    query_vec = encode_query(cropped)
-
-                with st.spinner("Searching similar products..."):
-                    results = search(query_vec, top_k)
+                with st.spinner(
+                    "Searching with CLIP + BLIP-2 reranking..."
+                ):
+                    results = search(
+                        cropped,
+                        top_k
+                    )
 
                 st.session_state["results"] = results
 
@@ -277,8 +402,10 @@ if uploaded is not None:
             if st.button("Re-crop"):
                 if "cropped_image" in st.session_state:
                     del st.session_state["cropped_image"]
+
                 if "results" in st.session_state:
                     del st.session_state["results"]
+
                 st.rerun()
 
 # =====================================================
@@ -290,18 +417,40 @@ if "results" in st.session_state:
     results = st.session_state["results"]
     cols = st.columns(len(results))
 
-    for i, (path, score) in enumerate(results):
-        full_path = os.path.join(IMAGE_DIR, path)
+    for i, (
+        path,
+        final_score,
+        clip_score,
+        semantic_score
+    ) in enumerate(results):
+
+        full_path = os.path.join(
+            IMAGE_DIR,
+            path
+        )
 
         try:
-            result_img = Image.open(full_path).convert("RGB")
+            result_img = Image.open(
+                full_path
+            ).convert("RGB")
         except Exception:
             continue
 
         with cols[i]:
-            st.image(result_img, use_container_width=True)
+            st.image(
+                result_img,
+                use_container_width=True
+            )
             st.markdown(f"**Rank {i+1}**")
-            st.markdown(f"**Score:** {score:.3f}")
+            st.markdown(
+                f"**Final Score:** {final_score:.3f}"
+            )
+            st.markdown(
+                f"CLIP: {clip_score:.3f}"
+            )
+            st.markdown(
+                f"BLIP-2: {semantic_score:.2f}"
+            )
             st.caption(path)
 
 # =====================================================
@@ -310,5 +459,5 @@ if "results" in st.session_state:
 st.markdown("---")
 st.caption(
     "Pipeline: Upload Image → YOLO Detection → Region Selection → "
-    "Crop Confirmation → Fine-Tuned CLIP Embedding → HNSW Retrieval"
+    "Fine-Tuned CLIP Retrieval → BLIP-2 Semantic Re-ranking"
 )

@@ -1,17 +1,67 @@
-# Large folders and generated files
-data/
-models/*.pth
-outputs/*.npy
-outputs/*.json
-outputs/*.index
-
-# Virtual environments
+# =====================================================
+# Virtual Environments
+# =====================================================
 vr_env/
 venv/
+.env/
 
-# Python cache
+# =====================================================
+# Python Cache
+# =====================================================
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.ipynb_checkpoints/
 
-src/env
+# =====================================================
+# OS / Editor Files
+# =====================================================
+.DS_Store
+Thumbs.db
+.vscode/settings.json
+
+# =====================================================
+# Temporary Files
+# =====================================================
+.dist/
+crop.log
+
+# =====================================================
+# Dataset (keep only README)
+# =====================================================
+data/*
+!data/README.md
+
+# =====================================================
+# Large Model Checkpoints (keep README only)
+# =====================================================
+models/*.pth
+models/*.pt
+!models/README.md
+
+# =====================================================
+# Downloaded Model Weights
+# =====================================================
 *.pt
+
+# =====================================================
+# Large Generated Binary Files
+# =====================================================
+outputs/embeddings*.npy
+outputs/faiss*.index
+outputs/cropped_images/
+
+# Keep useful JSON and README files in outputs
+!outputs/*.json
+!outputs/README.md
+
+# =====================================================
+# Local Environment Files
+# =====================================================
+src/env
+
+# =====================================================
+# Logs
+# =====================================================
+*.log

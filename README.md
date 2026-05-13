@@ -267,3 +267,9 @@ python src/query_pipeline_ft.py
 - Ultralytics YOLO
 - Streamlit
 - Matplotlib
+
+## Additional Folder Notes
+
+- data/README.md — Dataset download instructions
+- models/README.md — Information about fine-tuned checkpoints
+- outputs/README.md — Description of generated outputs and results
