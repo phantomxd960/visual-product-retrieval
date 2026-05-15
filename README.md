@@ -268,6 +268,71 @@ python src/query_pipeline_ft.py
 - Streamlit
 - Matplotlib
 
+## Multi-Seed Training and Robustness Analysis
+
+The fine-tuned CLIP model was trained using three different random seeds:
+
+- 2023031
+- 2023032
+- 2023033
+
+These seeds affect data shuffling and optimization, leading to slightly different model checkpoints. For each seed, the full retrieval pipeline was executed:
+
+1. Fine-tune CLIP
+2. Generate fused embeddings
+3. Build FAISS index
+4. Evaluate retrieval performance
+
+To study the effect of semantic fusion, two image-text fusion weights were tested:
+
+- α = 0.7
+- α = 0.9
+
+This produced a total of six experimental runs. Final results are reported as **mean ± standard deviation** across all runs.
+
+---
+
+## BLIP-2 Semantic Re-ranking
+
+After the initial FAISS retrieval, the top candidates are re-ranked using BLIP-2.
+
+For each retrieved item:
+
+1. The stored caption is loaded.
+2. BLIP-2 estimates whether the query image matches the caption.
+3. A semantic compatibility score is generated.
+4. The final score is computed as:
+
+```text
+Final Score = 0.8 × CLIP Similarity + 0.2 × BLIP-2 Semantic Score
+
+Final Results (Explicit Query/Gallery Split)
+Mean ± Standard Deviation (6 Runs)
+Metric	@5	@10	@15
+Recall	1.0000 ± 0.0000	1.0000 ± 0.0000	1.0000 ± 0.0000
+mAP	0.9682 ± 0.0008	0.9337 ± 0.0019	0.9103 ± 0.0026
+NDCG	0.9213 ± 0.0026	0.9446 ± 0.0017	0.9564 ± 0.0013
+Best Configuration
+Seed: 2023031
+Alpha: 0.9
+Recall@5: 1.0000
+mAP@5: 0.9694
+NDCG@5: 0.9233
+Batch Evaluation Script
+
+The project includes a batch evaluation script that runs the retrieval pipeline over a set of query images and computes all required metrics.
+
+python src/evaluate_ft_query_gallery.py --seed 2023031 --alpha 0.9
+
+This script computes:
+
+Recall@5, Recall@10, Recall@15
+mAP@5, mAP@10, mAP@15
+NDCG@5, NDCG@10, NDCG@15
+
+using the best-performing model.
+```
+
 ## Additional Folder Notes
 
 - data/README.md — Dataset download instructions
